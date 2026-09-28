@@ -17,8 +17,9 @@ slot contributes its truth values weighted by overlap seconds, and closed slots 
 daytime gaps contribute zero. Directional (HORIZON_SECTOR) event multipliers and
 closures are applied per target only while they are active and cover the target.
 The airmass uses the target altitude at the exposure midpoint. The program
-band is derived from site weather and the field-center lunar quality without
-instrument efficiency (v3 convention) or directional-event multipliers.
+band is derived per target from site weather and that target's own lunar
+quality and airmass, without instrument efficiency (v3 convention) or
+directional-event multipliers.
 
 The BestLedger keeps every raw per-target contribution with its observe-action index so
 best scores are always replayable: invalidating an action window (data loss) is a flag
@@ -241,7 +242,10 @@ class WeatherTruth:
         score_config: Mapping,
         lunar_factor_at: Callable[[datetime], float] | None = None,
     ) -> float:
-        """Program-band quality: site weather and field-center Moon, no efficiency."""
+        """Program-band quality: site weather with the caller's lunar factor and airmass, no efficiency.
+
+        The runner passes per-target values, so one exposure may split across bands.
+        """
         total = 0.0
         weight = 0.0
         cursor = start

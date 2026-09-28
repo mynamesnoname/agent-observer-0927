@@ -110,7 +110,7 @@ agent 声明 `DARK`、`BRIGHT` 或 `BACKUP`；实际 band 由视场中心的天�
 | **已修复**  | `report` 仍不消耗模拟时间；连续超过 32 次零时长举报会终止运行，避免无限循环。                                                          | 已加入重复举报回归测试。                                            |
 | **条件性**  | 天气生成器允许 `instrument_fault.count` 大于 1，但 runner 只取第一项作为可举报/修复的故障；多个故障时真值效率和修复语义会不一致。                    | 限定配置为 0 或 1，或把故障状态改成事件集合。（回复：故障改为事件集合，同一时刻只存在一个故障）      |
 | **条件性**  | `rocket_launch.force_close` 可以配置为 false，但 scorer 仍按 `event_type=rocket_launch` 无条件把该扇区片段计零。            | 删除无效开关，或严格依照 `force_close` 判定。（回复：删除无效开关）               |
-| **待决定**  | program band 使用**视场中心**月光和曝光开始时的中心空气质量，而 target 得分使用各自方向的月光与曝光中点空气质量；跨越阈值时，一个视场中不同 target 会共享同一个 band。 | 保留为清晰的“视场申报”规则，或改为逐目标/曝光中点判定，并在参赛契约中写明。（改为逐目标判定）        |
+| **已定规则**  | program band 曾使用**视场中心**月光和曝光开始时的中心空气质量，而 target 得分使用各自方向的月光与曝光中点空气质量；跨越阈值时，一个视场中不同 target 会共享同一个 band。 | 已按批注改为**逐目标判定**：band 用各 target 自身方向的月光与曝光中点空气质量，同一曝光内不同 target 可分属不同 band（回复：改为逐目标判定）。 |
 | **条件性**  | score、scenario、fiber 配置没有统一的交叉校验；例如现场参数和日期可彼此不一致，部分参数可设为零后在计算时才出错。                                     | 加载场景时联合校验配置版本、台址、时间范围、正值约束及输入产品一致性。                     |
 
 ## Appendix. 配置文件参数 key（当前原型）
@@ -146,7 +146,7 @@ agent 声明 `DARK`、`BRIGHT` 或 `BACKUP`；实际 band 由视场中心的天�
 | `weather_events.{sector_width_deg_range,sector_altitude_limit_deg_range}` | 方向性天气的扇区参数。 |
 | `weather_events.conditions.<condition>.{count,duration_slots,force_close,seeing_multiplier,transparency_multiplier,sky_quality_multiplier}` | 五类天气事件各自的次数、持续时间、关闭标记和质量乘子。 |
 | `weather_events.conditions.<condition>.scope_weights.ALL`、`weather_events.conditions.<condition>.scope_weights.HORIZON_SECTOR` | 全场/扇区抽样权重；`HORIZON_SECTOR` 只存在于允许方向事件的类别。 |
-| `rocket_launch.{count,duration_slots,azimuth_sector_width_deg,max_altitude_deg,force_close}` | 火箭发射次数、时长、扇区和关闭标记。 |
+| `rocket_launch.{count,duration_slots,azimuth_sector_width_deg,max_altitude_deg}` | 火箭发射次数、时长与扇区范围；发射期间扇区一律关闭（不再有 `force_close` 开关）。 |
 | `earthquake.{count,magnitude_range,impact_coefficient,reference_magnitude,max_degradation,decay_nights,negligible_degradation}` | 地震抽样和指数损伤/恢复参数。 |
 | `earthquake.{seeing_impact_coefficient,transparency_impact_coefficient,sky_quality_impact_coefficient}` | 对大气质量的附加影响；当前配置均为零。 |
 | `terrain_obstruction.{sector_count,width_deg_range,max_altitude_deg_range}` | 地形遮挡扇区数与范围。 |

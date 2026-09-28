@@ -1,0 +1,8 @@
+{
+  "targets_csv": "../../_0927output/astronomy_review/review_fixes/targets.csv",
+  "footprint_csv": "../../_0927output/astronomy_review/review_fixes/footprint.csv",
+  "summary_json": "../../_0927output/astronomy_review/review_fixes/summary.json",
+  "pdf_output": "../../_0927output/astronomy_review/review_fixes/sky_map.pdf",
+  "png_output": "../../_0927output/astronomy_review/review_fixes/sky_map.png",
+  "png_dpi": 200
+}

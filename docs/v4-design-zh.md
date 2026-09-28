@@ -2,8 +2,8 @@
 
 > **组织方内部文档。** 本文档包含隐藏真值语义与极限工况机制的完整细节
 > （地震参数、仪器故障、数据丢失窗口、方位角偏置数值等），**不属于选手可见
-> 材料**。选手可见的产物仅包括：targets.csv、天区图 PDF、公告/预报 JSONL 与
-> 未来协议文档中明确列出的字段。
+> 材料**。选手可见的信息包括 targets.csv、footprint.csv、天区图 PDF、
+> 按时发布的公告/预报，以及正式协议明确公开的台址、视场和评分参数。
 
 **2026-09-28 天文学模型评审增补：**开放观测门槛为太阳高度 −18°，地震
 持续影响限定为仪器效率。逐目标月光已按旧 starter kit 的方向模型加入评分，
@@ -25,6 +25,8 @@
 6. [scorer 与 run 循环（MP-057）](#6-scorer-与-run-循环mp-057)
 7. [调参指南](#7-调参指南)
 8. [再生成与验证](#8-再生成与验证)
+9. [当前实现核查与后续问题](#9-当前实现核查与后续问题)
+10. [配置文件参数 key](#10-配置文件参数-key)
 
 ## 1. 总览
 
@@ -93,7 +95,7 @@
 
 - `targets.csv`：列契约 `target_id, ra_deg, dec_deg, target_class, feature_flux,
   science_weight, required`（固定精度格式化）。
-- `footprint.csv`：`component_id, vertex_index, ra_deg, dec_deg`（组织方侧，
+- `footprint.csv`：`component_id, vertex_index, ra_deg, dec_deg`（公开的天区边界，
   随产物输出）。
 - `summary.json`：参数与统计 + 全部 sha256（不含墙钟时间，保证字节确定）。
 - 天区图：`sky_map.pdf` + `sky_map.png`，**Mollweide 全天投影**（RA 向左递增，
@@ -136,10 +138,10 @@ conda run -n survey-agent python -m challenge.v4_sky_map \
 | 事件 | 空间 | 时间演化 | 真值作用 | 可预报性 |
 | --- | --- | --- | --- | --- |
 | 天气系统（rainy/cloudy/smoggy/cold_wave/tornado） | ALL 或方位扇区 | 持续若干可观测 slot，跨昼夜续算 | 乘子作用于质量分量；rainy/tornado 强制关闭 | 可预报（粗措辞 rain/overcast/haze/cold_snap/storm） |
-| 火箭发射 | 方位扇区 | 排程驱动，2–5 个可观测 slot | 扇区内 force_close | 可预报 |
+| 火箭发射 | 方位扇区 | 排程驱动，2–5 个可观测 slot | 扇区内始终关闭观测 | 可预报 |
 | 地震 | 全局 | 瞬时 shock + 按夜指数衰减 | d₀ = min(0.95, exp(0.75·(M−6.8))) 随震级指数上升；dₙ = d₀·exp(−n/4)；仅仪器效率 eff ×(1−d)，seeing/transparency/sky 保持独立的天气真值；逐夜明细单列 CSV | **不可预报**（公告可见） |
 | 地形遮挡 | 方位扇区（1–3 个） | 开场即有、永久 | 扇区内观测判零分（`zero_score=true`） | 仅开场公告一次粗方向 |
-| 仪器故障 | 全局 | 持续至被举报修复 | 隐藏效率乘数 [0.4, 0.7]，叠加在抖动基线上 | **不可预报、不公告**（只能从分数抖动反推） |
+| 仪器故障 | 全局 | 每个事件持续至下一故障开始或赛季结束；举报可提前修复该事件 | 隐藏效率乘数 [0.4, 0.7]，叠加在抖动基线上；事件互不重叠 | **不可预报、不公告**（只能从分数抖动反推） |
 
 默认配置实例：地震 M5.94（d₀=0.523，衰减 16 夜）与 M5.48（d₀=0.372，15 夜）；
 遮挡扇区方位 45.3°→103.4°、高度 ≤43.7°（方向 E，超过 30° 计分下限）；仪器故障使真值效率从
@@ -265,7 +267,7 @@ q_exp(i) = q0⁻¹ · eff* · transp* · sky_quality* · lunar(i)
            / (seeing* · airmass(i)^0.6)
 lunar(i) = 1 − p · illum · sin(max(0, moon_alt))^a · exp(−rho(i)/theta)
 g(i,e)   = min( f(i)·t·q_exp(i) / (f0·t0), 1 )        # 遮挡/未命中/高度无效 → 0
-s(i,e)   = weight(i) · g(i,e) · prog_mult(e)           # 加成折入贡献再取 max
+s(i,e)   = weight(i) · g(i,e) · prog_mult(i,e)         # 各目标独立判档，再取 max
 best(i)  = max over valid exposures e of s(i,e)
 
 total = Σ_i best(i)
@@ -286,10 +288,10 @@ total = Σ_i best(i)
 
 实施细节：site 级分量按曝光区间与 slot 真值求交加权（关闭 slot 和夜间 slot 之外
 的时间计零）；airmass 用曝光中点 target 高度角；方向性事件按实际起止时刻切分
-曝光、逐 target 在不超过 120 s 的片段中判定方位；星号分量含适用事件乘子；地形遮挡与火箭 force_close
+曝光、逐 target 在不超过 120 s 的片段中判定方位；星号分量含适用事件乘子；地形遮挡与火箭事件
 只将命中扇区的片段计零；最低高度角同时检查含偏置的实际视场中心与目标自身的
-整个曝光区间；仪器故障含在真值效率中，事发后首次正确举报在该决策
-时刻结算并修复，后续曝光按乘数反除；地震从发生的 slot 起进入真值，同夜此前
+整个曝光区间；仪器故障含在真值效率中，每个事件独立记录修复状态，正确举报在该决策
+时刻结算并修复当前故障，后续曝光按该事件乘数反除；地震从发生的 slot 起进入真值，同夜此前
 的 slot 不受影响。`illum` 由太阳—月亮角距求月相照亮度；`rho(i)` 为月亮—目标
 角距，`moon_alt` 为月亮高度角。月光因子在每个不超过 120 s 的评分片段中按
 片段中点计算；月亮在地平线下时为 1。参数在 `score_config.lunar_model`，
@@ -309,7 +311,7 @@ BRIGHT、否则 BACKUP——同一次曝光内不同 target 可分属不同 band
 - required：所有有效曝光的最大 factor < 0.5 的每个 required target 罚 50；
 - RA 条带均匀度：footprint 内按 10° 分带，r = 带内 factor ≥ 0.5 的占比，
   罚 U·(1 − Jain(r))（全空带定义 Jain=0）；
-- 举报：故障实际发生后首次正确举报 +100（立即修复）；提前举报、重复举报或空报 −150；连续超过 32 次零时长举报会终止运行；
+- 举报：对当前尚未修复的故障首次正确举报 +100（立即修复该事件）；提前举报、重复举报或空报 −150；连续超过 32 次零时长举报会终止运行；
 - 不设 wait 罚分（连续时间下时间本身就是预算）、不设换向成本。
 
 ### 6.4 连续时间模型与数据丢失施用
@@ -361,8 +363,8 @@ required 缺 983、总分 −40719.282362。stress 数据丢失于 2026-11-07T03
 
 **当前 `astronomy_review/review_fixes/` 样例**（修正赤经窗口、事件可观测
 slot 计时与心射投影）：default 700 次曝光，Σbest 2712.633403、required 缺
-1225、总分 −58630.654700；stress 4500 次曝光，Σbest 7531.873850、
-required 缺 981、总分 −41621.099434，数据丢失窗口 [2772,2936)，
+1225、总分 −58630.654700；stress 4500 次曝光，Σbest 7530.814618、
+required 缺 981、总分 −41622.158666，数据丢失窗口 [2772,2936)，
 974 条观测失效。两组数字只用于核对生成器、几何和计分流水线。
 
 ### 6.6 确定性与性能
@@ -436,9 +438,10 @@ conda run -n survey-agent python -m challenge.v4_runner \
 | `tests/test_v4_fiber_map.py` | 27 | 派生量、命中三态、球面心射投影与天顶、回绕、偏置、坐标往返、曝光终点高度、action 校验、CLI 冒烟 |
 | `tests/test_v4_scorer.py` | 28 | 昼夜空档、方向事件时间与空间施用、实时举报、逐目标月光与旧版公式一致、sky_quality 方向、完成门槛、无效化重算、resync、上下文隔离、重复举报终止、确定性 |
 
-任何改动后必须通过：上述 88 项 v4 测试 + v3 冻结回归
+正式发布前应通过：上述 88 项 v4 测试 + v3 冻结回归
 （`pytest challenge/tests tests/test_challenge_runner.py
-tests/test_starter_kit.py`）。
+tests/test_starter_kit.py`）。本次 4.2 批注修订按用户要求未单独运行测试；
+当前 default/stress 样例重建只用于更新文档产物。
 
 ### 8.3 v3 冻结注意事项
 
@@ -450,3 +453,131 @@ tests/test_starter_kit.py`）。
   配置在测试临时目录中生成两组产物比较，不再依赖旧 `/tmp/v4_baseline/`。
 - 运行时核心保持纯 Python 标准库（worker 契约）；matplotlib/numpy 只允许出现
   在 `v4_sky_map.py` 与 `v4_fiber_map.py` 的演示图部分（构建期依赖，惰性导入）。
+
+## 9. 当前实现核查与后续问题
+
+本节整合原 `doc_we_need.md` 的问题清单；已修复项描述当前实现，条件性与待决定项留作后续工作。
+
+### 9.1 天区和 target
+
+| 状态      | 问题与影响                                                                                                                                                                     | 建议                                                                  |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| **已修复** | 建表窗口现在同时检查目标赤经相邻的 360° 展开区间，能计算日落前过中天但在前半夜仍可观测的 target。 | 赤经回绕及跨日落回归测试已加入；星表已重新生成。 |
+| **条件性** | 片间间隔检查只比较顶点与顶点，不能严格证明两条大圆边之间保持设定间隔；换用更复杂轮廓时，可能出现边相交或边间距不足。                                                                                                                | 用球面弧段相交与弧段最短角距校验。                                                   |
+| **待决定** | “均匀位置”由包围圆盘中的 `r∝√u` 抽样再拒绝，严格的球面面积均匀性未验证；高斯团簇也只是比赛用密度模型。                                                                                                                  | 若要求精确面密度，改为球面面积抽样并验证天区内的空间分布。                                       |
+| **条件性** | 类别配额先逐类四舍五入，再按绝对舍入误差修正总数；在改动类别比例时，不一定等同标准最大余数法。当前示例比例可整除总数，未受影响。                                                                                                          | 改为先取下整，再按剩余小数分配名额。                                                  |
+
+### 9.2 天气和事件
+
+| 状态      | 问题与影响                                                                                                                | 建议                                                                |
+| ------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| **已修复** | 天气和火箭事件的 `duration_slots` 现在按真正的可观测 slot 计数，跨越白天时延续到后续观测夜，且不超过赛季末尾。 | 已加入跨昼夜和生成事件覆盖 slot 数的测试。 |
+| **条件性** | 预报先按覆盖区间选事件，但 `notices[].nights` 收集事件触及的**全部**夜晚，未再裁剪到该份预报的覆盖区间。较长事件会使一份预报列出期限外夜晚。                                   | 生成 `nights` 时与预报覆盖区间取交。                                           |
+| **已修复** | 已删除未被生成器使用的 `quality.instrument_efficiency.nominal` key；效率基线由抖动区间定义。 | 默认与压力天气配置均已同步。 |
+| **条件性** | 当前生成配置含固定 `seed`。若把生成配置连同可运行的真值生成器直接交给参赛者，未来天气与事件可被本地重建。                                                             | 正式赛将内部生成配置与选手包分离，并在官方轮次前轮换种子。                                     |
+| **条件性** | 夜/slot 相关系数及部分概率、区间参数缺少完整范围校验；错误配置可能在生成期报数学异常或产生无意义真值。                                                               | 在加载配置时逐项校验概率、相关系数和区间端点。                                           |
+| **待决定** | 地震损伤由震级直接映射，不含震源距、深度或台址响应；天气和地震效应分离已实现，但该损伤强度仍是比赛代理量。                                                                | 若要更接近台址物理，单独设计地震传播/响应模型，不把震级当作当地实测振动。                             |
+
+### 9.3 fibermap
+
+| 状态      | 问题与影响                                                       | 建议                                    |
+| ------- | ----------------------------------------------------------- | ------------------------------------- |
+| **已修复** | 视场投影改为以实际指向为中心的球面心射切平面，在天顶和普通高度使用同一公式。天顶处以实际中心方位角约定平面方向。      | 已增加天顶、普通高度及玻璃边界回归测试。                  |
+| **已修复** | 压力偏差若将实际中心推至 `[0,90]` 以外，该曝光判不命中、时间仍消耗。                     | 投影与 runner 对实际中心均检查范围。                |
+| **已修复** | fiber 数量必须是**正的**完全平方数。                                     | 配置校验和零值回归测试已加入。                       |
+| **待决定** | 方格玻璃是比赛抽象，不是实际光纤孔径。若未来加入边缘损失，不能直接把半度方格的中心距离套入角秒尺度 Gaussian。 | 先决定是否需要吞吐模型；如需要，再引入角秒级目标偏心、PSF 与孔径尺度。 |
+
+### 9.4 scorer
+
+| 状态       | 问题与影响                                                                                                  | 建议                                                      |
+| -------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| **部署要求** | 本地 runner 已从初始化上下文移除内部真值路径，只提供公开信息；同进程 callable 仍可访问本地文件系统，不能作为正式赛的安全边界。                               | 按主办方决定，正式赛在 GitHub 服务器运行，只挂载允许公开的数据，并验证 agent 无法读取隐藏真值。 |
+| **已定规则** | 数据丢失在事件时刻之后的**下一决策点**触发；当前动作先完成，再按当时已执行的 observe 数量 `N` 无效化并发送重同步。                                     | 规则已写入 runner 注释和共享文档，相关测试保持此语义。                         |
+| **已修复**  | `report` 仍不消耗模拟时间；连续超过 32 次零时长举报会终止运行，避免无限循环。                                                          | 已加入重复举报回归测试。                                            |
+| **已修复** | 故障已改为按时间排序、互不重叠的事件集合；每个事件独立记录举报修复状态。 | 后一故障开始时前一事件结束，正确举报只修复当前事件。 |
+| **已修复** | 已删除 `rocket_launch.force_close` 配置 key；火箭事件的方位扇区始终关闭。 | 天气配置版本升至 `v4-weather-v2`。 |
+| **已定规则** | program band 逐 target 判定，使用该目标方向的月光与曝光中点空气质量。 | 同一曝光中不同 target 可以分属不同 band，并各自计算匹配倍率。 |
+| **条件性**  | score、scenario、fiber 配置没有统一的交叉校验；例如现场参数和日期可彼此不一致，部分参数可设为零后在计算时才出错。                                     | 加载场景时联合校验配置版本、台址、时间范围、正值约束及输入产品一致性。                     |
+
+## 10. 配置文件参数 key
+
+以下列**全部现有 key**，不重复列出内部随机种子和产品路径的实际值。`site.*` 在 catalog、weather、fiber 和 scenario 中重复；weather 默认与 stress 文件的 key 结构相同，仅配置值不同。`<class>` 取 `ELG/BGS/LRG/QSO/Star`，`<condition>` 取 `rainy/cloudy/smoggy/cold_wave/tornado`。表中的 `{a,b}` 表示两个独立 key，不是 JSON 语法。
+
+### A. `v4_catalog_config.json`
+
+| 路径 / key                                                                                                                       | 含义                        |
+| ------------------------------------------------------------------------------------------------------------------------------ | ------------------------- |
+| `schema_version`, `seed`                                                                                                       | 配置版本；目录生成随机种子（内部）。        |
+| `site.{name,latitude_deg,longitude_deg,utc_offset_hours}`                                                                      | 台址名称、经纬度、地方时间相对 UTC 的小时差。 |
+| `footprint.{total_area_deg2,area_tolerance_fraction,n_components}`                                                             | 目标总面积、容差、分片数。             |
+| `footprint.{component_area_weights,component_centers,component_gap_deg,pole_margin_deg}`                                       | 分片面积权重、候选中心、最小间隔、天极留白。    |
+| `footprint.{vertices_per_component,harmonic_amplitude_ranges}`                                                                 | 每片顶点数、谐波振幅范围。             |
+| `targets.{total_count,required_fraction,clustered_fraction,n_cluster_centers,cluster_sigma_deg}`                               | 总数、必做比例及成团位置模型。           |
+| `targets.class_fractions.<class>`                                                                                              | 各类别比例。                    |
+| `targets.models.<class>.{flux_median,flux_log_sigma,science_weight}`                              | 各类属性分布与科学权重。              |
+| `observability.{start_date,end_date,sun_altitude_limit_deg,minimum_altitude_deg,minimum_window_seconds,max_position_attempts}` | 建表日期、高度门槛、最短连续窗口及重采样次数。   |
+| `output.directory`                                                                                                             | 内部生成目录。                   |
+
+### B. `v4_weather_config.json` 与 `v4_weather_stress_config.json`
+
+| 路径 / key | 含义 |
+| --- | --- |
+| `schema_version`, `seed` | 配置版本；天气与事件随机种子（内部）。 |
+| `site.{name,latitude_deg,longitude_deg,utc_offset_hours}` | 台址。 |
+| `survey.{start_date,end_date,slot_seconds,sun_altitude_limit_deg}` | 夜历范围、slot 长度、太阳高度门槛。 |
+| `quality.<field>.{nominal,seasonal_amplitude,night_sigma,slot_sigma,minimum,maximum}` | `<field>` 为 `seeing_arcsec/transparency/sky_quality`；季节、跨夜、slot 噪声及裁剪界。 |
+| `quality.instrument_efficiency.{jitter_minimum,jitter_maximum,minimum,maximum}` | 仪器效率抖动区间与裁剪界。 |
+| `quality.{night_correlation,slot_correlation,seasonal_phase_day}` | 两级相关系数与季节相位。 |
+| `background_closure.{start_probability_per_open_slot,reopen_probability_per_closed_slot,seasonal_probability_amplitude}` | 背景开闭马尔可夫过程。 |
+| `weather_events.{sector_width_deg_range,sector_altitude_limit_deg_range}` | 方向性天气的扇区参数。 |
+| `weather_events.conditions.<condition>.{count,duration_slots,force_close,seeing_multiplier,transparency_multiplier,sky_quality_multiplier}` | 五类天气事件各自的次数、持续时间、关闭标记和质量乘子。 |
+| `weather_events.conditions.<condition>.scope_weights.ALL`、`weather_events.conditions.<condition>.scope_weights.HORIZON_SECTOR` | 全场/扇区抽样权重；`HORIZON_SECTOR` 只存在于允许方向事件的类别。 |
+| `rocket_launch.{count,duration_slots,azimuth_sector_width_deg,max_altitude_deg}` | 火箭发射次数、时长与扇区范围；发射期间扇区一律关闭（不再有 `force_close` 开关）。 |
+| `earthquake.{count,magnitude_range,impact_coefficient,reference_magnitude,max_degradation,decay_nights,negligible_degradation}` | 地震抽样和指数损伤/恢复参数。 |
+| `earthquake.{seeing_impact_coefficient,transparency_impact_coefficient,sky_quality_impact_coefficient}` | 对大气质量的附加影响；当前配置均为零。 |
+| `terrain_obstruction.{sector_count,width_deg_range,max_altitude_deg_range}` | 地形遮挡扇区数与范围。 |
+| `instrument_fault.{count,instrument_efficiency_multiplier_range}` | 仪器故障次数与效率损失区间。 |
+| `publication.{forecast_interval_days,forecast_horizon_days}` | 预报发布周期与覆盖天数。 |
+| `stress_tests.enabled` | 压力事件总开关。 |
+| `stress_tests.data_loss.{trigger,window_max_fraction}` | 数据丢失触发方式及最大窗口比例；当 `trigger=fixed_slot` 时另需 `slot_id`，当 `trigger=fixed_date` 时另需 `date`（这两个可选 key 不在当前两份 JSON 中）。 |
+| `stress_tests.pointing_offset.{max_abs_alt_rad,max_abs_az_rad}` | 高度角、方位角固定偏差的抽样绝对上限。 |
+| `output.directory` | 内部生成目录。 |
+
+### C. `v4_fiber_config.json` 与 `v4_sky_map_config.json`
+
+| 文件 | 路径 / key | 含义 |
+| --- | --- | --- |
+| fiber | `schema_version` | fiber 几何配置版本。 |
+| fiber | `site.{name,latitude_deg,longitude_deg,utc_offset_hours}` | 台址。 |
+| fiber | `field.{fiber_area_deg2,gap_deg,n_fibers}` | 单元玻璃面积、窗框间隔、单元数量。 |
+| fiber | `exposure.{min_duration_seconds,max_duration_seconds}` | 动作时长下上界。 |
+| fiber | `demo.{targets_csv,moment_utc,png_output}` | 演示数据和绘图设置，不参与正式评分。 |
+| sky map | `targets_csv`, `footprint_csv`, `summary_json` | 天区图读取的三个产物。 |
+| sky map | `pdf_output`, `png_output`, `png_dpi` | 图件输出位置与 PNG 分辨率。 |
+
+### D. `v4_score_config.json`
+
+| 路径 / key | 当前含义 |
+| --- | --- |
+| `schema_version` | 评分配置版本。 |
+| `q0`, `flux_zero_point`, `exposure_zero_point_seconds`, `airmass_exponent` | 观测质量、flux、曝光时间和空气质量归一化。 |
+| `lunar_model.{angular_decay_scale_deg,altitude_exponent,maximum_penalty}` | 月亮角距衰减尺度、高度指数、最大损失。 |
+| `program.bands.{DARK,BRIGHT}` | 视场质量的两道 program 阈值。 |
+| `program.multipliers.{DARK,BRIGHT,BACKUP}`, `program.mismatch_multiplier` | 三种匹配加成和不匹配倍率。 |
+| `required.{penalty_per_missing,observed_factor_threshold}` | required 未达标罚分与完成因子门槛。 |
+| `uniformity.{weight,ra_band_width_deg,observed_factor_threshold}` | RA 均匀度权重、分带宽度及已观测门槛。 |
+| `reporting.{correct_reward,false_penalty}` | 正确与错误故障举报结算。 |
+
+### E. `v4_scenario_default.json` 与 `v4_scenario_stress.json`
+
+| 路径 / key | 含义 |
+| --- | --- |
+| `schema_version`, `name` | 场景配置版本、场景名。 |
+| `site.{name,latitude_deg,longitude_deg,utc_offset_hours}` | 当前场景台址。 |
+| `minimum_altitude_deg`, `fiber_config`, `score_config` | 最低观测高度、fiber 配置和评分配置引用。 |
+| `products.{targets_csv,footprint_csv,night_calendar_csv,slots_csv,weather_truth_csv,events_csv,earthquake_effects_csv,bulletins_jsonl,forecasts_jsonl}` | 场景输入产物引用；其中真值文件只应由隔离的评分端读取。 |
+| `stress.enabled` | 是否启用压力事件。 |
+| `stress.stress_events_csv` | 压力事件真值引用，仅 stress 场景存在。 |
+| `agent_params.max_observes` | 当前探针 agent 的最大 observe 次数；不是 runner 通用硬上限。 |
+
+配置键盘点：`catalog.observability`、`weather.survey` 和 `scenario.minimum_altitude_deg` 分别独立配置；台址也重复出现。当前样例手工对齐，代码尚未统一校验，因此改一处时必须同步检查其他配置及派生产物。
